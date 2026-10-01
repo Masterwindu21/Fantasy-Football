@@ -1,4 +1,4 @@
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import datetime
 from espn_api.football import League
 import pandas as pd
@@ -22,8 +22,6 @@ ESPN_S2 = "AEAgg0lunSBGY7T2U26biXMf26T0JjWREwRdibosZahxrNqxXvUC6%2BU0Z4j2SMzhsGI
 # ================= 3. HILFSFUNKTIONEN =================
 def get_owner_name(team):
   """Hilfsfunktion zur zuverlässigen Ermittlung des Manager-Namens"""
-  if not team:
-    return "Unbekannt"
   if hasattr(team, "owners") and team.owners:
     owner = team.owners[0]
     if isinstance(owner, dict):
@@ -36,7 +34,7 @@ def get_owner_name(team):
       return owner.strip()
   if hasattr(team, "owner") and team.owner:
     return str(team.owner).strip()
-  return getattr(team, "team_name", "Unbekannt")
+  return team.team_name
 
 
 # ================= 4. DATENABFRAGE (MIT CACHE) =================
@@ -58,11 +56,8 @@ def fetch_league_data():
           "seasons": 0,
           "highscore": 0.0,
           "lowscore": float("inf"),
-          "trades": 0,
       }
   )
-
-  trade_partners = defaultdict(lambda: Counter())
 
   for year in range(START_YEAR, CURRENT_YEAR + 1):
     try:
@@ -76,28 +71,29 @@ def fetch_league_data():
       playoff_spots = getattr(league.settings, "playoff_team_count", 6)
       total_teams_in_year = len(league.teams)
 
-      team_id_to_owner = {}
       for team in league.teams:
         owner = get_owner_name(team)
-        team_id_to_owner[team.team_id] = owner
 
-        reg_w = getattr(team, "wins", 0)
-        reg_l = getattr(team, "losses", 0)
-        reg_t = getattr(team, "ties", 0)
+        # 1. Regular Season Stats
+        reg_w = team.wins
+        reg_l = team.losses
+        reg_t = team.ties
 
         stats[owner]["reg_wins"] += reg_w
         stats[owner]["reg_losses"] += reg_l
         stats[owner]["reg_ties"] += reg_t
-        stats[owner]["points_for"] += getattr(team, "points_for", 0.0)
-        stats[owner]["points_against"] += getattr(team, "points_against", 0.0)
+        stats[owner]["points_for"] += team.points_for
+        stats[owner]["points_against"] += team.points_against
         stats[owner]["seasons"] += 1
 
+        # Rang des Teams ermitteln
         team_rank = getattr(
             team, "final_standing", getattr(team, "standing", 99)
         )
         is_season_over = year < CURRENT_YEAR
         is_championship_bracket = team_rank <= playoff_spots
 
+        # 2. Auszeichnungen
         if is_season_over:
           if team_rank == 1:
             stats[owner]["titles"] += 1
@@ -108,6 +104,7 @@ def fetch_league_data():
           if is_championship_bracket:
             stats[owner]["playoff_apps"] += 1
 
+        # 3. Playoffs
         if hasattr(team, "outcomes"):
           reg_games_played = reg_w + reg_l + reg_t
           post_season = team.outcomes[reg_games_played:]
@@ -118,6 +115,7 @@ def fetch_league_data():
               elif outcome in ["L", "LOSS"]:
                 stats[owner]["playoff_losses"] += 1
 
+        # 4. Rekorde
         if hasattr(team, "scores") and hasattr(team, "outcomes"):
           for score, outcome in zip(team.scores, team.outcomes):
             if outcome in ["W", "WIN", "L", "LOSS", "T", "TIE"] and score > 0:
@@ -126,50 +124,10 @@ def fetch_league_data():
               if score < stats[owner]["lowscore"]:
                 stats[owner]["lowscore"] = score
 
-      # Abgesicherte Trade-Ermittlung
-      try:
-        if hasattr(league, "recent_activity"):
-          activities = league.recent_activity(size=250)
-          seen_trades = set()
-
-          for act in activities:
-            actions = getattr(act, "actions", [])
-            trade_actions = []
-            for a in actions:
-              try:
-                if len(a) >= 2 and "TRADED" in str(a[1]).upper():
-                  trade_actions.append(a)
-              except Exception:
-                continue
-
-            if trade_actions:
-              act_date = getattr(act, "date", None)
-              trade_key = act_date if act_date else id(act)
-              if trade_key in seen_trades:
-                continue
-              seen_trades.add(trade_key)
-
-              involved_teams = list(
-                  {
-                      a[0].team_id
-                      for a in trade_actions
-                      if hasattr(a[0], "team_id")
-                  }
-              )
-              if len(involved_teams) == 2:
-                m1 = team_id_to_owner.get(involved_teams[0])
-                m2 = team_id_to_owner.get(involved_teams[1])
-                if m1 and m2 and m1 != m2:
-                  stats[m1]["trades"] += 1
-                  stats[m2]["trades"] += 1
-                  trade_partners[m1][m2] += 1
-                  trade_partners[m2][m1] += 1
-      except Exception:
-        pass
-
-    except Exception:
+    except Exception as e:
       pass
 
+  # 5. Aufbereitung
   formatted_data = []
   for manager, s in stats.items():
     reg_games = s["reg_wins"] + s["reg_losses"] + s["reg_ties"]
@@ -191,13 +149,6 @@ def fetch_league_data():
         else f"{s['reg_wins']}-{s['reg_losses']}"
     )
 
-    partner_counts = trade_partners[manager]
-    if partner_counts:
-      top_p, count = partner_counts.most_common(1)[0]
-      fav_partner = f"{top_p} ({count}x)"
-    else:
-      fav_partner = "–"
-
     formatted_data.append({
         "Manager": manager,
         "Saisons": s["seasons"],
@@ -214,8 +165,6 @@ def fetch_league_data():
         "Ø Pkt": round(avg_points, 1),
         "High": round(s["highscore"], 1),
         "Low": round(low_score_val, 1),
-        "Trades": s["trades"],
-        "Lieblingspartner": fav_partner,
     })
 
   return formatted_data
@@ -239,7 +188,7 @@ df = pd.DataFrame(raw_data)
 if not df.empty:
   df = df.sort_values(by=["1. Platz", "PF"], ascending=[False, False])
 
-  col1, col2, col3, col4 = st.columns(4)
+  col1, col2, col3 = st.columns(3)
   with col1:
     best_high = df.loc[df["High"].idxmax()]
     st.metric(
@@ -262,16 +211,6 @@ if not df.empty:
         delta=most_sackos["Manager"],
         delta_color="inverse",
     )
-  with col4:
-    if df["Trades"].max() > 0:
-      most_trades = df.loc[df["Trades"].idxmax()]
-      st.metric(
-          label="Trade-König 🤝",
-          value=f"{most_trades['Trades']} Trades",
-          delta=most_trades["Manager"],
-      )
-    else:
-      st.metric(label="Trade-König 🤝", value="0 Trades", delta="–")
 
   st.divider()
 
@@ -281,9 +220,7 @@ if not df.empty:
   st.divider()
 
   st.subheader("📈 Visuelle Auswertungen")
-  tab1, tab2, tab3 = st.tabs(
-      ["Erzielte Punkte (PF)", "Win Percentage", "Trade-Aktivität"]
-  )
+  tab1, tab2 = st.tabs(["Erzielte Punkte (PF)", "Win Percentage"])
 
   with tab1:
     st.bar_chart(df.set_index("Manager")["PF"])
@@ -297,17 +234,9 @@ if not df.empty:
           "Zu wenige Daten für den Win Percentage Vergleich (Manager benötigen"
           " >3 Saisons)."
       )
-
-  with tab3:
-    if df["Trades"].sum() > 0:
-      st.bar_chart(df.set_index("Manager")["Trades"])
-    else:
-      st.info(
-          "Keine historischen Trades über die API für diesen Zeitraum"
-          " auffindbar."
-      )
 else:
   st.error(
       "Es konnten keine Daten geladen werden. Bitte überprüfe deine Liga-ID und"
       " Cookies (SWID / ESPN_S2)."
   )
+
