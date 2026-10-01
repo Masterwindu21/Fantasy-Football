@@ -126,7 +126,6 @@ def fetch_league_data():
 
       # ================= TRADES AUSLESEN =================
       # 1. Direkte Zählung über Team Transaction Counter
-      season_had_direct_trades = False
       for team in league.teams:
         owner = team_id_to_owner.get(team.team_id)
         if not owner:
@@ -143,18 +142,23 @@ def fetch_league_data():
 
         if t_count > 0:
           stats[owner]["trades"] += t_count
-          season_had_direct_trades = True
 
-      # 2. Transaktions-Feed für Partner & Fallback-Zählung
+      # 2. Lieblingspartner über Transaktions- und Kommunikations-Historie ermitteln
       try:
-        data = league.espn_request.league_get(params={"view": "mTransactions2"})
+        params = {"view": ["mTransactions2", "kona_league_communication"]}
+        data = league.espn_request.league_get(params=params)
+
         transactions = []
         if isinstance(data, dict):
-          transactions = data.get("transactions", [])
-          if not transactions and "communication" in data:
-            transactions = data.get("communication", {}).get("topics", [])
+          if "transactions" in data:
+            transactions.extend(data["transactions"])
+          if "communication" in data and "topics" in data["communication"]:
+            for topic in data["communication"]["topics"]:
+              if "messages" in topic:
+                transactions.extend(topic["messages"])
 
-        seen_trades = set()
+        trade_events = defaultdict(set)
+
         for t in transactions:
           t_type = str(t.get("type", "")).upper()
           t_status = str(t.get("status", "")).upper()
@@ -163,33 +167,37 @@ def fetch_league_data():
               not t_status
               or t_status in ["EXECUTED", "ACCEPTED", "COMPLETE", "APPROVED"]
           ):
-            trade_id = t.get("id") or t.get("proposedDate")
-            if trade_id in seen_trades:
-              continue
-            seen_trades.add(trade_id)
+            t_id = (
+                t.get("id")
+                or t.get("transactionId")
+                or t.get("proposedDate")
+                or t.get("date")
+            )
 
             items = t.get("items", [])
-            involved_teams = set()
-
             for item in items:
-              f_id = item.get("fromTeamId")
-              t_id = item.get("toTeamId")
-              if f_id and f_id > 0:
-                involved_teams.add(f_id)
-              if t_id and t_id > 0:
-                involved_teams.add(t_id)
+              from_id = item.get("fromTeamId")
+              to_id = item.get("toTeamId")
+              if from_id and from_id > 0:
+                trade_events[t_id].add(from_id)
+              if to_id and to_id > 0:
+                trade_events[t_id].add(to_id)
 
-            if len(involved_teams) == 2:
-              team_a, team_b = list(involved_teams)
-              m1 = team_id_to_owner.get(team_a)
-              m2 = team_id_to_owner.get(team_b)
+            if t.get("teamId") and t.get("teamId") > 0:
+              trade_events[t_id].add(t.get("teamId"))
+            if t.get("targetTeamId") and t.get("targetTeamId") > 0:
+              trade_events[t_id].add(t.get("targetTeamId"))
 
-              if m1 and m2 and m1 != m2:
-                if not season_had_direct_trades:
-                  stats[m1]["trades"] += 1
-                  stats[m2]["trades"] += 1
-                trade_partners[m1][m2] += 1
-                trade_partners[m2][m1] += 1
+        for t_id, teams in trade_events.items():
+          if len(teams) == 2:
+            team_a, team_b = list(teams)
+            m1 = team_id_to_owner.get(team_a)
+            m2 = team_id_to_owner.get(team_b)
+
+            if m1 and m2 and m1 != m2:
+              trade_partners[m1][m2] += 1
+              trade_partners[m2][m1] += 1
+
       except Exception:
         pass
 
