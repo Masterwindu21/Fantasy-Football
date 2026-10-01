@@ -124,46 +124,57 @@ def fetch_league_data():
               if score < stats[owner]["lowscore"]:
                 stats[owner]["lowscore"] = score
 
-      # Trades auslesen
+      # ================= TRADES AUSLESEN =================
       try:
-        data = league.espn_request.league_get(params={"view": "mTransactions2"})
-        transactions = data.get("transactions", [])
+        # ESPN API Header & View für Transaktionen
+        headers = {
+            "x-fantasy-filter": (
+                '{"filterTransactions":{"filterType":{"value":["TRADE"]}}}'
+            )
+        }
+        data = league.espn_request.league_get(
+            params={"view": "mTransactions2"}, headers=headers
+        )
+
+        transactions = []
+        if isinstance(data, dict):
+          transactions = data.get(
+              "transactions",
+              data.get("communication", {}).get("topics", []),
+          )
+
         seen_trades = set()
 
         for t in transactions:
+          # Prüfung auf ausgeführten Trade
           t_type = t.get("type", "")
           t_status = t.get("status", "")
 
-          if "TRADE" in t_type.upper() and t_status.upper() in [
+          if "TRADE" in str(t_type).upper() and str(t_status).upper() in [
               "EXECUTED",
               "ACCEPTED",
               "COMPLETE",
           ]:
+            trade_id = t.get("id") or t.get("proposedDate")
+            if trade_id in seen_trades:
+              continue
+            seen_trades.add(trade_id)
+
             items = t.get("items", [])
             involved_teams = set()
 
             for item in items:
-              from_team = item.get("fromTeamId")
-              to_team = item.get("toTeamId")
-              if from_team and from_team > 0:
-                involved_teams.add(from_team)
-              if to_team and to_team > 0:
-                involved_teams.add(to_team)
+              f_id = item.get("fromTeamId")
+              t_id = item.get("toTeamId")
+              if f_id and f_id > 0:
+                involved_teams.add(f_id)
+              if t_id and t_id > 0:
+                involved_teams.add(t_id)
 
             if len(involved_teams) == 2:
-              t_list = sorted(list(involved_teams))
-              trade_sig = (
-                  t.get("proposedDate", t.get("id")),
-                  t_list[0],
-                  t_list[1],
-              )
-
-              if trade_sig in seen_trades:
-                continue
-              seen_trades.add(trade_sig)
-
-              m1 = team_id_to_owner.get(t_list[0])
-              m2 = team_id_to_owner.get(t_list[1])
+              team_a, team_b = list(involved_teams)
+              m1 = team_id_to_owner.get(team_a)
+              m2 = team_id_to_owner.get(team_b)
 
               if m1 and m2 and m1 != m2:
                 stats[m1]["trades"] += 1
@@ -172,60 +183,6 @@ def fetch_league_data():
                 trade_partners[m2][m1] += 1
       except Exception:
         pass
-
-    except Exception:
-      pass
-
-  formatted_data = []
-  for manager, s in stats.items():
-    reg_games = s["reg_wins"] + s["reg_losses"] + s["reg_ties"]
-    total_wins = s["reg_wins"] + s["playoff_wins"]
-    total_games = reg_games + s["playoff_wins"] + s["playoff_losses"]
-
-    win_pct = (
-        ((total_wins + (0.5 * s["reg_ties"])) / total_games * 100)
-        if total_games > 0
-        else 0.0
-    )
-    diff = s["points_for"] - s["points_against"]
-    avg_points = (s["points_for"] / reg_games) if reg_games > 0 else 0.0
-    low_score_val = s["lowscore"] if s["lowscore"] != float("inf") else 0.0
-
-    reg_record = (
-        f"{s['reg_wins']}-{s['reg_losses']}-{s['reg_ties']}"
-        if s["reg_ties"] > 0
-        else f"{s['reg_wins']}-{s['reg_losses']}"
-    )
-
-    partner_counts = trade_partners[manager]
-    if partner_counts:
-      top_p, count = partner_counts.most_common(1)[0]
-      fav_partner = f"{top_p} ({count}x)"
-    else:
-      fav_partner = "–"
-
-    formatted_data.append({
-        "Manager": manager,
-        "Saisons": s["seasons"],
-        "Reg W-L-T": reg_record,
-        "PO W-L": f"{s['playoff_wins']}-{s['playoff_losses']}",
-        "Win %": round(win_pct, 1),
-        "POs": f"{s['playoff_apps']}/{s['seasons']}",
-        "1. Platz": s["titles"],
-        "2. Platz": s["runner_ups"],
-        "Sacko": s["last_places"],
-        "PF": round(s["points_for"], 1),
-        "PA": round(s["points_against"], 1),
-        "Diff": round(diff, 1),
-        "Ø Pkt": round(avg_points, 1),
-        "High": round(s["highscore"], 1),
-        "Low": round(low_score_val, 1),
-        "Trades": s["trades"],
-        "Lieblingspartner": fav_partner,
-    })
-
-  return formatted_data
-
 
 # ================= 5. DASHBOARD UI =================
 st.title("🏆 B.U.M.S. League - All-Time Dashboard")
