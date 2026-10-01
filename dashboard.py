@@ -124,34 +124,45 @@ def fetch_league_data():
               if score < stats[owner]["lowscore"]:
                 stats[owner]["lowscore"] = score
 
-      # Trades über API abfragen
-      try:
-        headers = {
-            "x-fantasy-filter": (
-                '{"filterTransactions":{"filterType":{"value":["TRADE"]}}}'
-            )
-        }
-        data = league.espn_request.league_get(
-            params={"view": "mTransactions2"}, headers=headers
-        )
+      # ================= TRADES AUSLESEN =================
+      # 1. Direkte Zählung über Team Transaction Counter
+      season_had_direct_trades = False
+      for team in league.teams:
+        owner = team_id_to_owner.get(team.team_id)
+        if not owner:
+          continue
 
+        t_counter = getattr(team, "transaction_counter", None)
+        t_count = 0
+        if isinstance(t_counter, dict):
+          t_count = t_counter.get("trades", 0)
+        elif hasattr(t_counter, "trades"):
+          t_count = getattr(t_counter, "trades", 0)
+        elif hasattr(team, "trades"):
+          t_count = getattr(team, "trades", 0)
+
+        if t_count > 0:
+          stats[owner]["trades"] += t_count
+          season_had_direct_trades = True
+
+      # 2. Transaktions-Feed für Partner & Fallback-Zählung
+      try:
+        data = league.espn_request.league_get(params={"view": "mTransactions2"})
         transactions = []
         if isinstance(data, dict):
-          transactions = data.get(
-              "transactions",
-              data.get("communication", {}).get("topics", []),
-          )
+          transactions = data.get("transactions", [])
+          if not transactions and "communication" in data:
+            transactions = data.get("communication", {}).get("topics", [])
 
         seen_trades = set()
         for t in transactions:
-          t_type = t.get("type", "")
-          t_status = t.get("status", "")
+          t_type = str(t.get("type", "")).upper()
+          t_status = str(t.get("status", "")).upper()
 
-          if "TRADE" in str(t_type).upper() and str(t_status).upper() in [
-              "EXECUTED",
-              "ACCEPTED",
-              "COMPLETE",
-          ]:
+          if "TRADE" in t_type and (
+              not t_status
+              or t_status in ["EXECUTED", "ACCEPTED", "COMPLETE", "APPROVED"]
+          ):
             trade_id = t.get("id") or t.get("proposedDate")
             if trade_id in seen_trades:
               continue
@@ -174,8 +185,9 @@ def fetch_league_data():
               m2 = team_id_to_owner.get(team_b)
 
               if m1 and m2 and m1 != m2:
-                stats[m1]["trades"] += 1
-                stats[m2]["trades"] += 1
+                if not season_had_direct_trades:
+                  stats[m1]["trades"] += 1
+                  stats[m2]["trades"] += 1
                 trade_partners[m1][m2] += 1
                 trade_partners[m2][m1] += 1
       except Exception:
