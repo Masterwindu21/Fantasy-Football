@@ -1,3 +1,43 @@
+from collections import Counter, defaultdict
+from datetime import datetime
+from espn_api.football import League
+import pandas as pd
+import streamlit as st
+
+# ================= 1. SEITENKONFIGURATION =================
+st.set_page_config(
+    page_title="B.U.M.S. League History", page_icon="🏈", layout="wide"
+)
+
+# ================= 2. EINSTELLUNGEN =================
+LEAGUE_ID = 35203
+START_YEAR = 2014
+CURRENT_YEAR = datetime.now().year
+
+# API Credentials
+SWID = "{3759A752-7B49-4018-99A7-527B49701821}"
+ESPN_S2 = "AEAgg0lunSBGY7T2U26biXMf26T0JjWREwRdibosZahxrNqxXvUC6%2BU0Z4j2SMzhsGI3zp6wZQz4SaRNR4gdhZrlRJBBs7jCjhu7RX%2B9tz5v8D%2BFomTu6uIP%2FzA4G7Vnx0MFu86mKcW47UW%2BD4gCfNciA1zTHyX6PA6121V3%2BmXJ9lvgQE%2FmDzV2Hp%2BxmRWFWpJjLkFO5yArCUTpgO7Cx6tiUeznf9%2BN9KPkt5J%2BqPpdzB0iV1xYk39HdF2EN2rXz9ZIetc1nLl4V9fis5HyTb5rpQNtwseMAx3wCw1WAGI3QQ%3D%3D"
+
+
+# ================= 3. HILFSFUNKTIONEN =================
+def get_owner_name(team):
+  """Hilfsfunktion zur zuverlässigen Ermittlung des Manager-Namens"""
+  if hasattr(team, "owners") and team.owners:
+    owner = team.owners[0]
+    if isinstance(owner, dict):
+      first = owner.get("firstName", "")
+      last = owner.get("lastName", "")
+      full = f"{first} {last}".strip()
+      if full:
+        return full
+    elif isinstance(owner, str):
+      return owner.strip()
+  if hasattr(team, "owner") and team.owner:
+    return str(team.owner).strip()
+  return team.team_name
+
+
+# ================= 4. DATENABFRAGE (MIT CACHE) =================
 @st.cache_data(ttl=3600)
 def fetch_league_data():
   stats = defaultdict(
@@ -84,20 +124,13 @@ def fetch_league_data():
               if score < stats[owner]["lowscore"]:
                 stats[owner]["lowscore"] = score
 
-      # ================= TRADES AUSLESEN (ROH-ENDPOINT) =================
+      # Trades auslesen
       try:
-        # Direkte Abfrage des Kommunikations- und Transaktions-Views von ESPN
-        params = {"view": "mTransactions2"}
-        endpoint = (
-            f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{year}/segments/0/leagues/{LEAGUE_ID}"
-        )
-        data = league.espn_request.league_get(params=params)
-
+        data = league.espn_request.league_get(params={"view": "mTransactions2"})
         transactions = data.get("transactions", [])
         seen_trades = set()
 
         for t in transactions:
-          # ESPN markiert Trades als executionType / type == 'TRADE'
           t_type = t.get("type", "")
           t_status = t.get("status", "")
 
@@ -119,7 +152,11 @@ def fetch_league_data():
 
             if len(involved_teams) == 2:
               t_list = sorted(list(involved_teams))
-              trade_sig = (t.get("proposedDate", t.get("id")), t_list[0], t_list[1])
+              trade_sig = (
+                  t.get("proposedDate", t.get("id")),
+                  t_list[0],
+                  t_list[1],
+              )
 
               if trade_sig in seen_trades:
                 continue
@@ -133,36 +170,8 @@ def fetch_league_data():
                 stats[m2]["trades"] += 1
                 trade_partners[m1][m2] += 1
                 trade_partners[m2][m1] += 1
-
       except Exception:
-        # Fallback auf recent_activity, falls mTransactions2 nicht greift
-        try:
-          activities = league.recent_activity(size=500)
-          for act in activities:
-            actions = getattr(act, "actions", [])
-            trade_actions = [
-                a
-                for a in actions
-                if len(a) >= 2 and str(a[1]).upper() == "TRADED"
-            ]
-            if trade_actions:
-              inv = list(
-                  {
-                      a[0].team_id
-                      for a in trade_actions
-                      if hasattr(a[0], "team_id")
-                  }
-              )
-              if len(inv) == 2:
-                m1 = team_id_to_owner.get(inv[0])
-                m2 = team_id_to_owner.get(inv[1])
-                if m1 and m2 and m1 != m2:
-                  stats[m1]["trades"] += 1
-                  stats[m2]["trades"] += 1
-                  trade_partners[m1][m2] += 1
-                  trade_partners[m2][m1] += 1
-        except Exception:
-          pass
+        pass
 
     except Exception:
       pass
@@ -216,3 +225,83 @@ def fetch_league_data():
     })
 
   return formatted_data
+
+
+# ================= 5. DASHBOARD UI =================
+st.title("🏆 B.U.M.S. League - All-Time Dashboard")
+st.markdown(
+    "Willkommen in der Hall of Fame (und Hall of Shame) eurer Liga. Die Daten"
+    " werden live über die ESPN API abgerufen!"
+)
+
+with st.spinner("Lade historische ESPN Daten..."):
+  raw_data = fetch_league_data()
+
+df = pd.DataFrame(raw_data)
+
+if not df.empty:
+  df = df.sort_values(by=["1. Platz", "PF"], ascending=[False, False])
+
+  col1, col2, col3, col4 = st.columns(4)
+  with col1:
+    best_high = df.loc[df["High"].idxmax()]
+    st.metric(
+        label="All-Time Highscore 🚀",
+        value=f"{best_high['High']} Pkt",
+        delta=best_high["Manager"],
+    )
+  with col2:
+    most_titles = df.loc[df["1. Platz"].idxmax()]
+    st.metric(
+        label="Meiste Titel 🥇",
+        value=f"{most_titles['1. Platz']}",
+        delta=most_titles["Manager"],
+    )
+  with col3:
+    most_sackos = df.loc[df["Sacko"].idxmax()]
+    st.metric(
+        label="Meiste Sackos 💩",
+        value=f"{most_sackos['Sacko']}",
+        delta=most_sackos["Manager"],
+        delta_color="inverse",
+    )
+  with col4:
+    most_trades = df.loc[df["Trades"].idxmax()]
+    st.metric(
+        label="Trade-König 🤝",
+        value=f"{most_trades['Trades']} Trades",
+        delta=most_trades["Manager"],
+    )
+
+  st.divider()
+
+  st.subheader("📊 Ewige Tabelle")
+  st.dataframe(df, use_container_width=True, hide_index=True)
+
+  st.divider()
+
+  st.subheader("📈 Visuelle Auswertungen")
+  tab1, tab2, tab3 = st.tabs(
+      ["Erzielte Punkte (PF)", "Win Percentage", "Trade-Aktivität"]
+  )
+
+  with tab1:
+    st.bar_chart(df.set_index("Manager")["PF"])
+
+  with tab2:
+    veterans = df[df["Saisons"] > 3]
+    if not veterans.empty:
+      st.bar_chart(veterans.set_index("Manager")["Win %"])
+    else:
+      st.info(
+          "Zu wenige Daten für den Win Percentage Vergleich (Manager benötigen"
+          " >3 Saisons)."
+      )
+
+  with tab3:
+    st.bar_chart(df.set_index("Manager")["Trades"])
+else:
+  st.error(
+      "Es konnten keine Daten geladen werden. Bitte überprüfe deine Liga-ID und"
+      " Cookies (SWID / ESPN_S2)."
+  )
