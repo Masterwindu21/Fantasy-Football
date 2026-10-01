@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from espn_api.football import League
 import pandas as pd
@@ -56,8 +56,12 @@ def fetch_league_data():
           "seasons": 0,
           "highscore": 0.0,
           "lowscore": float("inf"),
+          "trades": 0,
       }
   )
+
+  # trade_partners[Manager][Partner] = Anzahl Deals
+  trade_partners = defaultdict(lambda: Counter())
 
   for year in range(START_YEAR, CURRENT_YEAR + 1):
     try:
@@ -71,8 +75,11 @@ def fetch_league_data():
       playoff_spots = getattr(league.settings, "playoff_team_count", 6)
       total_teams_in_year = len(league.teams)
 
+      # Zuordnung team_id -> Manager für die Trade-Erkennung
+      team_id_to_owner = {}
       for team in league.teams:
         owner = get_owner_name(team)
+        team_id_to_owner[team.team_id] = owner
 
         # 1. Regular Season Stats
         reg_w = team.wins
@@ -124,10 +131,53 @@ def fetch_league_data():
               if score < stats[owner]["lowscore"]:
                 stats[owner]["lowscore"] = score
 
-    except Exception as e:
+      # 5. Trades & Lieblingspartner über recent_activity auswerten
+      try:
+        activities = league.recent_activity(size=1000)
+        seen_trades = set()
+
+        for act in activities:
+          actions = getattr(act, "actions", [])
+          trade_actions = [
+              a
+              for a in actions
+              if len(a) >= 2 and str(a[1]).upper() == "TRADED"
+          ]
+
+          if trade_actions:
+            trade_id = getattr(
+                act,
+                "date",
+                tuple(sorted([a[0].team_id for a in trade_actions])),
+            )
+            if trade_id in seen_trades:
+              continue
+            seen_trades.add(trade_id)
+
+            involved_teams = list(
+                {
+                    a[0].team_id
+                    for a in trade_actions
+                    if hasattr(a[0], "team_id")
+                }
+            )
+
+            if len(involved_teams) == 2:
+              m1 = team_id_to_owner.get(involved_teams[0])
+              m2 = team_id_to_owner.get(involved_teams[1])
+
+              if m1 and m2 and m1 != m2:
+                stats[m1]["trades"] += 1
+                stats[m2]["trades"] += 1
+                trade_partners[m1][m2] += 1
+                trade_partners[m2][m1] += 1
+      except Exception:
+        pass
+
+    except Exception:
       pass
 
-  # 5. Aufbereitung
+  # 6. Tabellen-Aufbereitung
   formatted_data = []
   for manager, s in stats.items():
     reg_games = s["reg_wins"] + s["reg_losses"] + s["reg_ties"]
@@ -149,6 +199,14 @@ def fetch_league_data():
         else f"{s['reg_wins']}-{s['reg_losses']}"
     )
 
+    # Top-Partner ermitteln
+    partner_counts = trade_partners[manager]
+    if partner_counts:
+      top_p, count = partner_counts.most_common(1)[0]
+      fav_partner = f"{top_p} ({count}x)"
+    else:
+      fav_partner = "–"
+
     formatted_data.append({
         "Manager": manager,
         "Saisons": s["seasons"],
@@ -165,6 +223,8 @@ def fetch_league_data():
         "Ø Pkt": round(avg_points, 1),
         "High": round(s["highscore"], 1),
         "Low": round(low_score_val, 1),
+        "Trades": s["trades"],
+        "Lieblingspartner": fav_partner,
     })
 
   return formatted_data
@@ -188,7 +248,7 @@ df = pd.DataFrame(raw_data)
 if not df.empty:
   df = df.sort_values(by=["1. Platz", "PF"], ascending=[False, False])
 
-  col1, col2, col3 = st.columns(3)
+  col1, col2, col3, col4 = st.columns(4)
   with col1:
     best_high = df.loc[df["High"].idxmax()]
     st.metric(
@@ -211,6 +271,13 @@ if not df.empty:
         delta=most_sackos["Manager"],
         delta_color="inverse",
     )
+  with col4:
+    most_trades = df.loc[df["Trades"].idxmax()]
+    st.metric(
+        label="Trade-König 🤝",
+        value=f"{most_trades['Trades']} Trades",
+        delta=most_trades["Manager"],
+    )
 
   st.divider()
 
@@ -220,7 +287,9 @@ if not df.empty:
   st.divider()
 
   st.subheader("📈 Visuelle Auswertungen")
-  tab1, tab2 = st.tabs(["Erzielte Punkte (PF)", "Win Percentage"])
+  tab1, tab2, tab3 = st.tabs(
+      ["Erzielte Punkte (PF)", "Win Percentage", "Trade-Aktivität"]
+  )
 
   with tab1:
     st.bar_chart(df.set_index("Manager")["PF"])
@@ -234,6 +303,9 @@ if not df.empty:
           "Zu wenige Daten für den Win Percentage Vergleich (Manager benötigen"
           " >3 Saisons)."
       )
+
+  with tab3:
+    st.bar_chart(df.set_index("Manager")["Trades"])
 else:
   st.error(
       "Es konnten keine Daten geladen werden. Bitte überprüfe deine Liga-ID und"
