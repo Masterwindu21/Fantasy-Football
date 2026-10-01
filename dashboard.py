@@ -124,9 +124,8 @@ def fetch_league_data():
               if score < stats[owner]["lowscore"]:
                 stats[owner]["lowscore"] = score
 
-      # ================= TRADES AUSLESEN =================
+      # Trades über API abfragen
       try:
-        # ESPN API Header & View für Transaktionen
         headers = {
             "x-fantasy-filter": (
                 '{"filterTransactions":{"filterType":{"value":["TRADE"]}}}'
@@ -144,9 +143,7 @@ def fetch_league_data():
           )
 
         seen_trades = set()
-
         for t in transactions:
-          # Prüfung auf ausgeführten Trade
           t_type = t.get("type", "")
           t_status = t.get("status", "")
 
@@ -183,6 +180,60 @@ def fetch_league_data():
                 trade_partners[m2][m1] += 1
       except Exception:
         pass
+
+    except Exception:
+      pass
+
+  formatted_data = []
+  for manager, s in stats.items():
+    reg_games = s["reg_wins"] + s["reg_losses"] + s["reg_ties"]
+    total_wins = s["reg_wins"] + s["playoff_wins"]
+    total_games = reg_games + s["playoff_wins"] + s["playoff_losses"]
+
+    win_pct = (
+        ((total_wins + (0.5 * s["reg_ties"])) / total_games * 100)
+        if total_games > 0
+        else 0.0
+    )
+    diff = s["points_for"] - s["points_against"]
+    avg_points = (s["points_for"] / reg_games) if reg_games > 0 else 0.0
+    low_score_val = s["lowscore"] if s["lowscore"] != float("inf") else 0.0
+
+    reg_record = (
+        f"{s['reg_wins']}-{s['reg_losses']}-{s['reg_ties']}"
+        if s["reg_ties"] > 0
+        else f"{s['reg_wins']}-{s['reg_losses']}"
+    )
+
+    partner_counts = trade_partners[manager]
+    if partner_counts:
+      top_p, count = partner_counts.most_common(1)[0]
+      fav_partner = f"{top_p} ({count}x)"
+    else:
+      fav_partner = "–"
+
+    formatted_data.append({
+        "Manager": manager,
+        "Saisons": s["seasons"],
+        "Reg W-L-T": reg_record,
+        "PO W-L": f"{s['playoff_wins']}-{s['playoff_losses']}",
+        "Win %": round(win_pct, 1),
+        "POs": f"{s['playoff_apps']}/{s['seasons']}",
+        "1. Platz": s["titles"],
+        "2. Platz": s["runner_ups"],
+        "Sacko": s["last_places"],
+        "PF": round(s["points_for"], 1),
+        "PA": round(s["points_against"], 1),
+        "Diff": round(diff, 1),
+        "Ø Pkt": round(avg_points, 1),
+        "High": round(s["highscore"], 1),
+        "Low": round(low_score_val, 1),
+        "Trades": s["trades"],
+        "Lieblingspartner": fav_partner,
+    })
+
+  return formatted_data
+
 
 # ================= 5. DASHBOARD UI =================
 st.title("🏆 B.U.M.S. League - All-Time Dashboard")
